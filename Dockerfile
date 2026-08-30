@@ -18,6 +18,13 @@ ENV AUDIO_DIR=/tmp/podcast_audio \
     KOKORO_MODEL_DIR=/tmp/kokoro \
     PORT=8000
 
+# Free tier = 512MB RAM / 0.1 CPU: single-threaded math kernels avoid thread
+# thrash, and capped glibc arenas keep RSS from creeping past the memory limit
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2
+
 EXPOSE 8000
 
 CMD ["python", "server.py"]

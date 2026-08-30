@@ -57,6 +57,21 @@ mcp = FastMCP(
 )
 
 
+_STARTED_AT = time.time()
+
+
+def _rss_mb() -> float | None:
+    """Resident memory in MB (Linux only) — for watching the 512MB free-tier limit."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        pass
+    return None
+
+
 def _public_base_url() -> str:
     return (
         os.environ.get("PUBLIC_BASE_URL")
@@ -223,7 +238,15 @@ def list_voices() -> dict[str, Any]:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "engine": engine.name, "model": engine.model_id})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "engine": engine.name,
+            "model": engine.model_id,
+            "uptime_seconds": round(time.time() - _STARTED_AT),
+            "rss_mb": _rss_mb(),
+        }
+    )
 
 
 @mcp.custom_route("/", methods=["GET"])

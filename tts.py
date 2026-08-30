@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import threading
@@ -209,6 +210,7 @@ class TTSEngine:
                     if chunk_index > 0:
                         segments.append(chunk_gap)
                     segments.append(self.backend.generate_chunk(chunk, voice, speed))
+                gc.collect()  # keep RSS flat on memory-tight instances
         if not segments:
             raise ValueError("Nothing to synthesize")
         waveform = np.concatenate(segments)
