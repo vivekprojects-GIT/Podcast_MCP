@@ -10,6 +10,7 @@ Transport: MCP streamable HTTP at /mcp (stateless), plus plain HTTP routes:
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
@@ -114,7 +116,7 @@ def _assign_voices(speakers: list[str], host_voice: str, guest_voice: str) -> di
 
 
 @mcp.tool()
-def generate_podcast_from_script(
+async def generate_podcast_from_script(
     script: str,
     title: str = "",
     host_voice: str = "",
@@ -130,6 +132,18 @@ def generate_podcast_from_script(
     host_voice and guest_voice. Leave voices empty for the engine defaults;
     call list_voices to see what's available. Returns a public audio_url.
     """
+    # Off the event loop: synthesis takes minutes on small instances, and the
+    # MCP SDK runs sync tools inline, which would block health checks.
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _generate_podcast_sync, script, title, host_voice, guest_voice, speed
+        )
+    )
+
+
+def _generate_podcast_sync(
+    script: str, title: str, host_voice: str, guest_voice: str, speed: float
+) -> dict[str, Any]:
     try:
         if len(script) > MAX_SCRIPT_CHARS:
             return {
@@ -181,7 +195,7 @@ def generate_podcast_from_script(
 
 
 @mcp.tool()
-def text_to_speech(
+async def text_to_speech(
     text: str,
     voice: str = "",
     speed: float = 1.0,
@@ -192,6 +206,12 @@ def text_to_speech(
     Leave voice empty for the engine default; call list_voices for options.
     format: "mp3" or "wav".
     """
+    return await anyio.to_thread.run_sync(
+        functools.partial(_text_to_speech_sync, text, voice, speed, format)
+    )
+
+
+def _text_to_speech_sync(text: str, voice: str, speed: float, format: str) -> dict[str, Any]:
     try:
         if len(text) > MAX_SCRIPT_CHARS:
             return {
