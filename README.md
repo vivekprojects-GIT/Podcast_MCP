@@ -140,6 +140,7 @@ Notes for the free tier:
 |---|---|---|
 | `TTS_ENGINE` | `kitten` (render.yaml sets `piper`) | `piper` (free-tier safe), `kitten`, or `kokoro` (needs paid RAM) |
 | `LOW_MEMORY_MODE` | `1` | Disables onnxruntime's memory arena + caps threads. Set `0` on big instances for speed |
+| `TTS_PACE` | `0.6` | Duty-cycle pacing: per-chunk sleep = chunk time × this, so health checks stay alive on 0.1-CPU instances. Set `0` on real CPUs |
 | `PIPER_MODEL_DIR` | `models/piper` (`/tmp/piper` in Docker) | Where Piper voice files are cached |
 | `KOKORO_VARIANT` | `int8` | `int8` (114 MB), `fp16` (164 MB), or `fp32` (326 MB) |
 | `KOKORO_MODEL_DIR` | `models/kokoro` (`/tmp/kokoro` in Docker) | Where Kokoro model files are cached |

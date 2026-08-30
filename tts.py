@@ -29,10 +29,14 @@ CHUNK_PAUSE = 0.18   # between chunks of one speaker turn
 TURN_PAUSE = 0.45    # between speaker turns
 
 
-# Pause between chunk generations so the event loop can answer health checks
-# on tiny (0.1 CPU) instances — without it, Render marks the service unhealthy
-# and restarts it mid-generation.
-_YIELD_SLEEP = float(os.environ.get("TTS_YIELD_SLEEP", "0.15"))
+# Duty-cycle pacing: after each chunk, sleep chunk_time * TTS_PACE (bounded
+# below/above) so the event loop keeps real CPU headroom to answer Render's
+# health checks on tiny (0.1 CPU) instances. Without it the cgroup quota is
+# fully consumed by synthesis, health checks starve, and Render restarts the
+# service mid-generation. Set TTS_PACE=0 on machines with real CPUs.
+_PACE = float(os.environ.get("TTS_PACE", "0.6"))
+_PACE_MIN_SLEEP = 0.3
+_PACE_MAX_SLEEP = 3.0
 
 
 def _deprioritize_current_thread() -> None:
@@ -342,9 +346,11 @@ class TTSEngine:
                 for chunk_index, chunk in enumerate(chunks):
                     if chunk_index > 0:
                         segments.append(chunk_gap)
+                    chunk_started = time.time()
                     segments.append(self.backend.generate_chunk(chunk, voice, speed))
-                    if _YIELD_SLEEP > 0:
-                        time.sleep(_YIELD_SLEEP)  # let the event loop answer health checks
+                    if _PACE > 0:
+                        elapsed = time.time() - chunk_started
+                        time.sleep(min(max(elapsed * _PACE, _PACE_MIN_SLEEP), _PACE_MAX_SLEEP))
                 gc.collect()  # keep RSS flat on memory-tight instances
         if not segments:
             raise ValueError("Nothing to synthesize")
