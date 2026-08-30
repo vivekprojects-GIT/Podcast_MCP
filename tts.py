@@ -1,8 +1,12 @@
-"""TTS engines behind one interface, selected with TTS_ENGINE=kitten|kokoro.
+"""TTS engines behind one interface, selected with TTS_ENGINE=piper|kitten|kokoro.
 
-- kitten: KittenTTS Nano (~56MB, 15M params). Lightest option.
-- kokoro: Kokoro-82M via kokoro-onnx. Much more natural voices; the int8
-  variant (~114MB model) still fits Render Free's 512MB RAM.
+- piper: Piper TTS (rhasspy voices, ~63MB each). Clear voices with a small
+  inference footprint — the only engine that fits Render Free's 512MB RAM
+  under real load (measured: ~230MB steady, ~370MB peak).
+- kitten: KittenTTS Nano. Small download but onnxruntime peaks at ~550MB
+  during generation — fine locally, too big for Render Free.
+- kokoro: Kokoro-82M via kokoro-onnx. Most natural voices; needs a paid
+  instance.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import os
 import threading
 import time
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 
 logger = logging.getLogger("podcast-mcp.tts")
@@ -22,6 +27,53 @@ SAMPLE_RATE = 24000
 # Pause lengths in seconds
 CHUNK_PAUSE = 0.18   # between chunks of one speaker turn
 TURN_PAUSE = 0.45    # between speaker turns
+
+
+_ORT_PATCHED = False
+
+
+def _low_memory_onnxruntime() -> None:
+    """Disable onnxruntime's CPU memory arena and cap its threads.
+
+    The arena retains peak activation memory and over-allocates in
+    power-of-two steps, which is what pushed every engine past Render Free's
+    512MB limit. Set LOW_MEMORY_MODE=0 on bigger instances for more speed.
+    """
+    global _ORT_PATCHED
+    if _ORT_PATCHED or os.environ.get("LOW_MEMORY_MODE", "1") != "1":
+        return
+    import onnxruntime as ort
+
+    original_session = ort.InferenceSession
+
+    class LowMemorySession(original_session):
+        def __init__(self, *args, **kwargs):
+            options = kwargs.get("sess_options") or ort.SessionOptions()
+            options.enable_cpu_mem_arena = False
+            options.intra_op_num_threads = 1
+            options.inter_op_num_threads = 1
+            kwargs["sess_options"] = options
+            super().__init__(*args, **kwargs)
+
+    ort.InferenceSession = LowMemorySession
+    _ORT_PATCHED = True
+    logger.info("onnxruntime patched for low memory (no arena, single thread)")
+
+
+def _download(url: str, path: Path) -> Path:
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Downloading %s ...", url)
+    started = time.time()
+    temp_path = path.with_suffix(path.suffix + ".part")
+    urllib.request.urlretrieve(url, temp_path)
+    temp_path.replace(path)
+    logger.info(
+        "Downloaded %s (%.0f MB) in %.0fs",
+        path.name, path.stat().st_size / 1e6, time.time() - started,
+    )
+    return path
 
 
 def _resample(samples, source_rate: int):
@@ -51,6 +103,7 @@ class KittenBackend:
 
     def load(self):
         if self._model is None:
+            _low_memory_onnxruntime()
             from kittentts import KittenTTS  # heavy import, keep lazy
 
             started = time.time()
@@ -101,24 +154,11 @@ class KokoroBackend:
         self._model = None
 
     def _fetch(self, filename: str) -> Path:
-        path = self.model_dir / filename
-        if path.exists():
-            return path
-        self.model_dir.mkdir(parents=True, exist_ok=True)
-        url = f"{_KOKORO_RELEASE}/{filename}"
-        logger.info("Downloading %s ...", url)
-        started = time.time()
-        temp_path = path.with_suffix(path.suffix + ".part")
-        urllib.request.urlretrieve(url, temp_path)
-        temp_path.replace(path)
-        logger.info(
-            "Downloaded %s (%.0f MB) in %.0fs",
-            filename, path.stat().st_size / 1e6, time.time() - started,
-        )
-        return path
+        return _download(f"{_KOKORO_RELEASE}/{filename}", self.model_dir / filename)
 
     def load(self):
         if self._model is None:
+            _low_memory_onnxruntime()
             from kokoro_onnx import Kokoro  # heavy import, keep lazy
 
             model_path = self._fetch(_KOKORO_MODELS[self.variant])
@@ -137,7 +177,84 @@ class KokoroBackend:
         return _resample(np.asarray(samples, dtype=np.float32), source_rate)
 
 
-_BACKENDS = {"kitten": KittenBackend, "kokoro": KokoroBackend}
+_PIPER_VOICES_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+
+
+class PiperBackend:
+    name = "piper"
+    # Curated en voices from rhasspy/piper-voices; any "<locale>-<name>-<quality>"
+    # voice from that repo also works (downloaded on demand).
+    voices = [
+        "en_US-hfc_male-medium", "en_US-hfc_female-medium",
+        "en_US-ryan-medium", "en_US-amy-medium", "en_US-lessac-medium",
+        "en_US-joe-medium", "en_US-kristin-medium", "en_US-kusal-medium",
+        "en_GB-alan-medium", "en_GB-cori-medium", "en_GB-jenny_dioco-medium",
+        "en_GB-northern_english_male-medium",
+    ]
+    default_host_voice = "en_US-hfc_male-medium"
+    default_guest_voice = "en_US-hfc_female-medium"
+    strict_voices = False
+    _MAX_LOADED = 2  # host + guest; keeps two ~130MB sessions max in RAM
+
+    def __init__(self) -> None:
+        self.model_dir = Path(os.environ.get("PIPER_MODEL_DIR", "models/piper"))
+        self.model_id = "piper-1.0-medium"
+        self._loaded: OrderedDict[str, object] = OrderedDict()
+
+    def _fetch_voice(self, voice: str) -> Path:
+        parts = voice.split("-")
+        if len(parts) != 3 or "_" not in parts[0]:
+            raise ValueError(
+                f"Piper voice must look like 'en_US-ryan-medium', got '{voice}'"
+            )
+        locale, name, quality = parts
+        base = f"{_PIPER_VOICES_BASE}/{locale.split('_')[0]}/{locale}/{name}/{quality}"
+        model_path = _download(f"{base}/{voice}.onnx", self.model_dir / f"{voice}.onnx")
+        _download(f"{base}/{voice}.onnx.json", self.model_dir / f"{voice}.onnx.json")
+        return model_path
+
+    def _get_voice(self, voice: str):
+        if voice in self._loaded:
+            self._loaded.move_to_end(voice)
+            return self._loaded[voice]
+        _low_memory_onnxruntime()
+        from piper import PiperVoice  # heavy import, keep lazy
+
+        model_path = self._fetch_voice(voice)
+        started = time.time()
+        loaded = PiperVoice.load(str(model_path))
+        logger.info("Piper voice '%s' loaded in %.1fs", voice, time.time() - started)
+        self._loaded[voice] = loaded
+        while len(self._loaded) > self._MAX_LOADED:
+            evicted, _ = self._loaded.popitem(last=False)
+            logger.info("Evicted Piper voice '%s' to save memory", evicted)
+            gc.collect()
+        return loaded
+
+    def load(self):
+        self._get_voice(self.default_host_voice)
+        self._get_voice(self.default_guest_voice)
+
+    def generate_chunk(self, text: str, voice: str, speed: float):
+        import numpy as np
+        from piper import SynthesisConfig
+
+        model = self._get_voice(voice)
+        config = SynthesisConfig(length_scale=1.0 / max(speed, 0.1))
+        pieces = []
+        sample_rate = SAMPLE_RATE
+        for chunk in model.synthesize(text, syn_config=config):
+            sample_rate = chunk.sample_rate
+            pieces.append(
+                np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16).astype(np.float32)
+                / 32768.0
+            )
+        if not pieces:
+            raise ValueError(f"Piper produced no audio for: {text[:60]!r}")
+        return _resample(np.concatenate(pieces), sample_rate)
+
+
+_BACKENDS = {"kitten": KittenBackend, "kokoro": KokoroBackend, "piper": PiperBackend}
 
 
 class TTSEngine:

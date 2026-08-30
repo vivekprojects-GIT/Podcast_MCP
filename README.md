@@ -1,13 +1,17 @@
 # Podcast MCP
 
 A lightweight MCP server that turns a podcast **script** into a finished **MP3**,
-designed to run on **Render Free**. Two CPU-only TTS engines, switched with `TTS_ENGINE`:
+designed to run on **Render Free**. Three CPU-only TTS engines, switched with `TTS_ENGINE`:
 
-- **`kitten`** (default) — [KittenTTS Nano](https://github.com/KittenML/KittenTTS)
-  (15M params, ~56 MB). Small and fast — the safe choice for the free 512MB instance.
+- **`piper`** (Render default) — [Piper TTS](https://github.com/OHF-Voice/piper1-gpl)
+  with rhasspy voices (~63 MB each, GPL-licensed engine). Clear voices and the only
+  engine that fits the free 512MB instance under real load (~230 MB steady, ~370 MB
+  peak, measured).
+- **`kitten`** (local default) — [KittenTTS Nano](https://github.com/KittenML/KittenTTS).
+  Small download, but onnxruntime peaks at ~550 MB during generation — gets
+  OOM-killed on Render Free.
 - **`kokoro`** (opt-in) — [Kokoro-82M](https://github.com/thewh1teagle/kokoro-onnx)
-  via ONNX (int8 ~114 MB). Much more natural voices, but heavier on RAM — use it
-  if you upgrade the instance (or test whether int8 squeezes into free).
+  via ONNX. The most natural voices; needs a paid instance.
 
 The reasoning stays in your main app; this service only does audio:
 
@@ -41,8 +45,8 @@ Report App shows audio player
 generate_podcast_from_script(
     script: str,            # "HOST: ...\nGUEST: ..." (any speaker labels work)
     title: str = "",
-    host_voice: str = "",   # empty = engine default (kokoro: am_michael, kitten: Jasper)
-    guest_voice: str = "",  # empty = engine default (kokoro: af_heart,  kitten: Bella)
+    host_voice: str = "",   # empty = engine default (piper: en_US-hfc_male-medium)
+    guest_voice: str = "",  # empty = engine default (piper: en_US-hfc_female-medium)
     speed: float = 1.0,
 )
 ```
@@ -80,6 +84,10 @@ text_to_speech(text: str, voice: str = "", speed: float = 1.0, format: str = "mp
 
 Returns the active engine, its voices, and the current defaults.
 
+- **piper**: `en_US-hfc_male-medium` (default host), `en_US-hfc_female-medium`
+  (default guest), plus ryan/amy/lessac/joe/kristin/kusal and `en_GB` voices; any
+  voice name from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
+  works and is downloaded on demand.
 - **kokoro**: 27 English voices — `af_*`/`am_*` American female/male, `bf_*`/`bm_*` British
   (e.g. `af_heart`, `af_bella`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`).
 - **kitten**: `Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo`.
@@ -116,13 +124,13 @@ Or add it to any MCP-capable agent as a remote server with URL
 
 Notes for the free tier:
 
-- First boot downloads the model into `/tmp` (~56 MB for kitten, ~142 MB for kokoro int8)
-  in a background preload, so the service is healthy immediately; the first tool call
+- First boot downloads the two default piper voices (~126 MB) into `/tmp` in a
+  background preload, so the service is healthy immediately; the first tool call
   may wait on it.
 - The instance sleeps after idle; the first request after a sleep takes ~1 min plus the
   model re-download (the disk is wiped on sleep/restart).
-- Want better voices? Set `TTS_ENGINE=kokoro` in the Render dashboard. If the 512 MB
-  instance then hits out-of-memory, switch back to `kitten`.
+- Keep `TTS_ENGINE=piper` on the free instance — kitten and kokoro exceed 512 MB
+  under load and get OOM-killed (502s mid-generation). They work on paid instances.
 - Audio files live on ephemeral disk and are deleted after `AUDIO_TTL_HOURS` (24h default)
   or on restart — have your app fetch/cache the MP3 promptly if it must keep it.
 
@@ -130,7 +138,9 @@ Notes for the free tier:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `TTS_ENGINE` | `kitten` | `kitten` (light, free-tier safe) or `kokoro` (better voices, more RAM) |
+| `TTS_ENGINE` | `kitten` (render.yaml sets `piper`) | `piper` (free-tier safe), `kitten`, or `kokoro` (needs paid RAM) |
+| `LOW_MEMORY_MODE` | `1` | Disables onnxruntime's memory arena + caps threads. Set `0` on big instances for speed |
+| `PIPER_MODEL_DIR` | `models/piper` (`/tmp/piper` in Docker) | Where Piper voice files are cached |
 | `KOKORO_VARIANT` | `int8` | `int8` (114 MB), `fp16` (164 MB), or `fp32` (326 MB) |
 | `KOKORO_MODEL_DIR` | `models/kokoro` (`/tmp/kokoro` in Docker) | Where Kokoro model files are cached |
 | `KITTEN_MODEL` | `KittenML/kitten-tts-nano-0.8` | Full-precision nano (~56MB). The `-int8` variant is smaller but has known quality issues |

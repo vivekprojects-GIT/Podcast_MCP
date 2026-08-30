@@ -16,6 +16,7 @@ COPY . .
 ENV AUDIO_DIR=/tmp/podcast_audio \
     HF_HOME=/tmp/hf_cache \
     KOKORO_MODEL_DIR=/tmp/kokoro \
+    PIPER_MODEL_DIR=/tmp/piper \
     PORT=8000
 
 # Free tier = 512MB RAM / 0.1 CPU: single-threaded math kernels avoid thread

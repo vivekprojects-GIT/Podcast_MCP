@@ -5,10 +5,10 @@ services:
     plan: free
     healthCheckPath: /health
     envVars:
-      # "kitten" = KittenTTS Nano (~56MB) — the safe choice for the free
-      # 512MB instance. Set to "kokoro" (with KOKORO_VARIANT=int8) for much
-      # more natural voices if you upgrade the instance or want to risk it.
+      # piper is the only engine that fits the free 512MB instance under real
+      # load (~230MB steady / ~370MB peak, measured). kitten and kokoro peak
+      # past 512MB and get OOM-killed — use them only on paid instances.
       - key: TTS_ENGINE
-        value: kitten
+        value: piper
       - key: AUDIO_TTL_HOURS
         value: "24"
