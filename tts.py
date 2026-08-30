@@ -29,6 +29,20 @@ CHUNK_PAUSE = 0.18   # between chunks of one speaker turn
 TURN_PAUSE = 0.45    # between speaker turns
 
 
+# Pause between chunk generations so the event loop can answer health checks
+# on tiny (0.1 CPU) instances — without it, Render marks the service unhealthy
+# and restarts it mid-generation.
+_YIELD_SLEEP = float(os.environ.get("TTS_YIELD_SLEEP", "0.15"))
+
+
+def _deprioritize_current_thread() -> None:
+    """Lower this thread's scheduling priority (Linux) so the web server wins."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+    except (AttributeError, OSError):
+        pass  # not Linux, or not permitted — best effort only
+
+
 _ORT_PATCHED = False
 
 
@@ -303,6 +317,7 @@ class TTSEngine:
 
     def preload(self) -> None:
         try:
+            _deprioritize_current_thread()
             with self._lock:
                 self.backend.load()
             logger.info("TTS engine '%s' (%s) preloaded", self.name, self.model_id)
@@ -318,6 +333,7 @@ class TTSEngine:
         chunk_gap = np.zeros(int(CHUNK_PAUSE * SAMPLE_RATE), dtype=np.float32)
         turn_gap = np.zeros(int(TURN_PAUSE * SAMPLE_RATE), dtype=np.float32)
 
+        _deprioritize_current_thread()
         segments = []
         with self._lock:
             for turn_index, (voice, chunks) in enumerate(turns):
@@ -327,6 +343,8 @@ class TTSEngine:
                     if chunk_index > 0:
                         segments.append(chunk_gap)
                     segments.append(self.backend.generate_chunk(chunk, voice, speed))
+                    if _YIELD_SLEEP > 0:
+                        time.sleep(_YIELD_SLEEP)  # let the event loop answer health checks
                 gc.collect()  # keep RSS flat on memory-tight instances
         if not segments:
             raise ValueError("Nothing to synthesize")
