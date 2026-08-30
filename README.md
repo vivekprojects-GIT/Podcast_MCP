@@ -1,1 +1,171 @@
-# Podcast_MCP
+# Podcast MCP
+
+A lightweight MCP server that turns a podcast **script** into a finished **MP3**,
+designed to run on **Render Free**. Two CPU-only TTS engines, switched with `TTS_ENGINE`:
+
+- **`kitten`** (default) — [KittenTTS Nano](https://github.com/KittenML/KittenTTS)
+  (15M params, ~56 MB). Small and fast — the safe choice for the free 512MB instance.
+- **`kokoro`** (opt-in) — [Kokoro-82M](https://github.com/thewh1teagle/kokoro-onnx)
+  via ONNX (int8 ~114 MB). Much more natural voices, but heavier on RAM — use it
+  if you upgrade the instance (or test whether int8 squeezes into free).
+
+The reasoning stays in your main app; this service only does audio:
+
+```text
+Report App (its own LLM)
+   ↓  report → HOST/GUEST dialogue script
+Podcast MCP on Render
+   ↓  1. parse script into speaker turns
+   ↓  2. split turns into TTS-safe chunks
+   ↓  3. KittenTTS generates host + guest audio
+   ↓  4. merge with natural pauses → MP3
+   ↓  5. serve file at /audio/<name>.mp3
+returns audio_url
+   ↓
+Report App shows audio player
+```
+
+## Endpoints
+
+| Path | What |
+|---|---|
+| `POST /mcp` | MCP streamable-HTTP endpoint (stateless, JSON responses) |
+| `GET /health` | Health check (used by Render) |
+| `GET /audio/{filename}` | Serves generated MP3/WAV files |
+
+## MCP tools
+
+### `generate_podcast_from_script`
+
+```python
+generate_podcast_from_script(
+    script: str,            # "HOST: ...\nGUEST: ..." (any speaker labels work)
+    title: str = "",
+    host_voice: str = "",   # empty = engine default (kokoro: am_michael, kitten: Jasper)
+    guest_voice: str = "",  # empty = engine default (kokoro: af_heart,  kitten: Bella)
+    speed: float = 1.0,
+)
+```
+
+Returns:
+
+```json
+{
+  "success": true,
+  "type": "podcast",
+  "title": "Q2 Business Review",
+  "audio_url": "https://podcast-mcp.onrender.com/audio/q2-business-review-a1b2c3d4.mp3",
+  "duration_seconds": 312.4,
+  "turns": 14,
+  "voices": {"HOST": "Jasper", "GUEST": "Bella"}
+}
+```
+
+Script format (markdown decoration and `[cues]` are tolerated; unlabeled lines
+continue the previous speaker):
+
+```text
+HOST: Welcome back to the show. Today we're looking at the Q2 results.
+GUEST: Thanks for having me. The headline: revenue grew 18 percent.
+HOST: Let's break that down...
+```
+
+### `text_to_speech`
+
+```python
+text_to_speech(text: str, voice: str = "", speed: float = 1.0, format: str = "mp3")
+```
+
+### `list_voices`
+
+Returns the active engine, its voices, and the current defaults.
+
+- **kokoro**: 27 English voices — `af_*`/`am_*` American female/male, `bf_*`/`bm_*` British
+  (e.g. `af_heart`, `af_bella`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`).
+- **kitten**: `Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo`.
+
+## Calling it from your report app
+
+With the official Python MCP client:
+
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async def make_podcast(script: str, title: str) -> str:
+    async with streamablehttp_client("https://podcast-mcp.onrender.com/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                "generate_podcast_from_script",
+                {"script": script, "title": title},
+            )
+            return result.structuredContent["audio_url"]
+```
+
+Or add it to any MCP-capable agent as a remote server with URL
+`https://<your-service>.onrender.com/mcp`.
+
+## Deploy on Render (free)
+
+1. Push this repo to GitHub.
+2. In Render: **New → Blueprint**, pick the repo — [render.yaml](render.yaml) provisions a free
+   Docker web service with `/health` checks.
+3. Done. `RENDER_EXTERNAL_URL` is used automatically to build `audio_url`s
+   (override with `PUBLIC_BASE_URL` if you put a domain in front).
+
+Notes for the free tier:
+
+- First boot downloads the model into `/tmp` (~56 MB for kitten, ~142 MB for kokoro int8)
+  in a background preload, so the service is healthy immediately; the first tool call
+  may wait on it.
+- The instance sleeps after idle; the first request after a sleep takes ~1 min plus the
+  model re-download (the disk is wiped on sleep/restart).
+- Want better voices? Set `TTS_ENGINE=kokoro` in the Render dashboard. If the 512 MB
+  instance then hits out-of-memory, switch back to `kitten`.
+- Audio files live on ephemeral disk and are deleted after `AUDIO_TTL_HOURS` (24h default)
+  or on restart — have your app fetch/cache the MP3 promptly if it must keep it.
+
+## Configuration (env vars)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `TTS_ENGINE` | `kitten` | `kitten` (light, free-tier safe) or `kokoro` (better voices, more RAM) |
+| `KOKORO_VARIANT` | `int8` | `int8` (114 MB), `fp16` (164 MB), or `fp32` (326 MB) |
+| `KOKORO_MODEL_DIR` | `models/kokoro` (`/tmp/kokoro` in Docker) | Where Kokoro model files are cached |
+| `KITTEN_MODEL` | `KittenML/kitten-tts-nano-0.8` | Full-precision nano (~56MB). The `-int8` variant is smaller but has known quality issues |
+| `DEFAULT_HOST_VOICE` / `DEFAULT_GUEST_VOICE` | engine defaults | Override default voices |
+| `PUBLIC_BASE_URL` | `RENDER_EXTERNAL_URL` or localhost | Base for returned `audio_url` |
+| `AUDIO_DIR` | `audio_output` (`/tmp/podcast_audio` in Docker) | Where files are written |
+| `AUDIO_TTL_HOURS` | `24` | Delete generated files older than this |
+| `MAX_SCRIPT_CHARS` | `20000` | Reject oversized scripts |
+| `PRELOAD_MODEL` | `1` | Load the model in the background at boot |
+
+## Run locally
+
+Works with plain pip on Windows/Mac/Linux (KittenTTS 0.8.1 bundles espeak via
+`espeakng-loader`, no system packages needed):
+
+```bash
+pip install -r requirements.txt
+```
+
+```bash
+python server.py
+```
+
+Then the MCP endpoint is `http://localhost:8000/mcp`. Or with Docker (same image Render uses):
+
+```bash
+docker build -t podcast-mcp .
+```
+
+```bash
+docker run -p 8000:8000 podcast-mcp
+```
+
+Pure-logic tests (no model needed):
+
+```bash
+python test_logic.py
+```

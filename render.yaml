@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: podcast-mcp
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # "kitten" = KittenTTS Nano (~56MB) — the safe choice for the free
+      # 512MB instance. Set to "kokoro" (with KOKORO_VARIANT=int8) for much
+      # more natural voices if you upgrade the instance or want to risk it.
+      - key: TTS_ENGINE
+        value: kitten
+      - key: AUDIO_TTL_HOURS
+        value: "24"

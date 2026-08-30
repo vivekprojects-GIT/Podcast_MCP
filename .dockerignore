@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+.venv
+venv
+.env
+audio_output
+*.mp3
+*.wav
+hf_cache
+README.md
+render.yaml
+test_logic.py
