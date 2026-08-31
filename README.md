@@ -88,6 +88,26 @@ Returns the active engine, its voices, and the current defaults.
   (default guest), plus ryan/amy/lessac/joe/kristin/kusal and `en_GB` voices; any
   voice name from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
   works and is downloaded on demand.
+
+### Languages (piper engine)
+
+Piper voices are **natively trained per language** (~35 languages in the rhasspy
+catalog) — this is real multilingual speech, not phonemization tricks. Write the
+script in the target language and pick voices whose locale matches:
+
+| Language | Example host / guest voices |
+|---|---|
+| English | `en_US-hfc_male-medium` / `en_US-hfc_female-medium` |
+| Dutch | `nl_NL-mls-medium` / `nl_BE-nathalie-medium` |
+| German | `de_DE-thorsten-medium` |
+| French / Spanish | `fr_FR-siwis-medium` / `es_ES-davefx-medium` |
+| Hindi | `hi_IN-rohan-medium` / `hi_IN-priyamvada-medium` |
+| Telugu | `te_IN-venkatesh-medium` / `te_IN-maya-medium` |
+
+A voice speaks only its own language — don't mix an `en_US` voice with a Dutch
+script. Note: the kitten engine is English-only (espeak can *phonemize* 100+
+languages, but the acoustic model is trained on English, so other languages
+come out garbled — don't advertise it as multilingual).
 - **kokoro**: 27 English voices — `af_*`/`am_*` American female/male, `bf_*`/`bm_*` British
   (e.g. `af_heart`, `af_bella`, `am_michael`, `am_adam`, `bf_emma`, `bm_george`).
 - **kitten**: `Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo`.

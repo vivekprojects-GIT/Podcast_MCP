@@ -195,19 +195,28 @@ class KokoroBackend:
         return _resample(np.asarray(samples, dtype=np.float32), source_rate)
 
 
-_PIPER_VOICES_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+# "main" also carries voices added after the v1.0.0 tag (hi, te, more nl, ...)
+_PIPER_VOICES_REF = os.environ.get("PIPER_VOICES_REF", "main")
+_PIPER_VOICES_BASE = f"https://huggingface.co/rhasspy/piper-voices/resolve/{_PIPER_VOICES_REF}"
 
 
 class PiperBackend:
     name = "piper"
-    # Curated en voices from rhasspy/piper-voices; any "<locale>-<name>-<quality>"
-    # voice from that repo also works (downloaded on demand).
+    # Curated voices from rhasspy/piper-voices; any "<locale>-<name>-<quality>"
+    # voice from that repo also works (downloaded on demand). Each voice is a
+    # natively trained model, so a voice speaks only its own language — pick
+    # voices whose locale matches the script's language.
     voices = [
         "en_US-hfc_male-medium", "en_US-hfc_female-medium",
         "en_US-ryan-medium", "en_US-amy-medium", "en_US-lessac-medium",
         "en_US-joe-medium", "en_US-kristin-medium", "en_US-kusal-medium",
         "en_GB-alan-medium", "en_GB-cori-medium", "en_GB-jenny_dioco-medium",
         "en_GB-northern_english_male-medium",
+        # a few of the ~35 supported languages:
+        "nl_NL-mls-medium", "nl_BE-nathalie-medium", "nl_BE-rdh-medium",
+        "de_DE-thorsten-medium", "fr_FR-siwis-medium", "es_ES-davefx-medium",
+        "hi_IN-rohan-medium", "hi_IN-priyamvada-medium",
+        "te_IN-venkatesh-medium", "te_IN-maya-medium",
     ]
     default_host_voice = "en_US-hfc_male-medium"
     default_guest_voice = "en_US-hfc_female-medium"
