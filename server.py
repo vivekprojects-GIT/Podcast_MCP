@@ -27,7 +27,7 @@ from starlette.responses import FileResponse, JSONResponse
 
 from script_parser import parse_script, split_into_chunks
 from tts import SAMPLE_RATE, TTSEngine, encode_mp3, encode_wav
-from video import build_video
+from video import build_video, embed_cover, render_podcast_cover
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("podcast-mcp")
@@ -195,6 +195,15 @@ def _generate_podcast_sync(
         waveform = engine.synthesize_turns(synth_input, speed=speed)
         path = _new_audio_path(title or "podcast", "mp3")
         encode_mp3(waveform, path)
+
+        thumbnail_url = None
+        try:
+            cover_path = path.with_suffix(".jpg")
+            render_podcast_cover(title or "Podcast", cover_path)
+            embed_cover(path, cover_path, title)
+            thumbnail_url = f"{_public_base_url()}/audio/{cover_path.name}"
+        except Exception:
+            logger.exception("Cover art failed; podcast delivered without it")
         _cleanup_old_files()
 
         duration = round(len(waveform) / SAMPLE_RATE, 1)
@@ -211,6 +220,8 @@ def _generate_podcast_sync(
             "turns": len(turns),
             "voices": {speaker: voice_map[speaker] for speaker in speakers_in_order},
         }
+        if thumbnail_url:
+            result["thumbnail_url"] = thumbnail_url
         warning = _duration_warning(sum(len(turn.text) for turn in turns))
         if warning:
             result["warning"] = warning
@@ -393,6 +404,8 @@ async def serve_audio(request: Request) -> FileResponse | JSONResponse:
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
         ".mp4": "video/mp4",
+        ".jpg": "image/jpeg",
+        ".png": "image/png",
     }.get(path.suffix, "application/octet-stream")
     return FileResponse(path, media_type=media_type)
 
