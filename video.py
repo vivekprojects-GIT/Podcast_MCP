@@ -345,6 +345,21 @@ def build_video(
             ffmpeg, "-y",
             "-f", "concat", "-safe", "0", "-i", str(concat_path),
             "-i", str(narration_path),
+            # ONE THREAD, AND THIS IS A MEMORY SETTING MORE THAN A CPU ONE.
+            #
+            # libx264 defaults its thread count to the DETECTED CORE COUNT
+            # and allocates frame buffers per thread. Inside a container the
+            # detected count is the host's, not the 0.1 CPU this instance is
+            # entitled to, so the encoder sized itself for a machine it does
+            # not have and the buffers scaled with video length.
+            #
+            # Measured: a 1-section deck rendered leaving RSS at 129MB, two
+            # sections rendered, three killed the instance - starting from
+            # 128MB with 384MB free. The Python process was never the one
+            # running out of room; ffmpeg's children were. Every other thread
+            # pool in this image is already pinned to one (OMP, OpenBLAS,
+            # MKL); this one was missed.
+            "-threads", "1",
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
             "-r", "4", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
