@@ -8,6 +8,7 @@ an MP4; still-image encoding keeps CPU and RAM small enough for Render Free.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import shutil
@@ -15,7 +16,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tts import SAMPLE_RATE, TTSEngine, encode_wav
+from tts import SAMPLE_RATE, TTSEngine
 from script_parser import split_into_chunks
 
 logger = logging.getLogger("podcast-mcp.video")
@@ -278,25 +279,59 @@ def build_video(
     with tempfile.TemporaryDirectory(prefix="video_") as workdir_str:
         workdir = Path(workdir_str)
         pause = np.zeros(int(SECTION_PAUSE * SAMPLE_RATE), dtype=np.float32)
-        waveforms: list = []
         durations: list[float] = []
 
-        for index, section in enumerate(sections):
-            slide_path = workdir / f"slide_{index:03d}.png"
-            render_slide(section, index, len(sections), deck_title, slide_path)
-
-            narration = _section_narration(section, index)
-            chunks = split_into_chunks(narration, max_chunk_chars)
-            waveform = engine.synthesize_turns([(voice, chunks)], speed=speed)
-            waveform = np.concatenate([waveform, pause])
-            waveforms.append(waveform)
-            durations.append(len(waveform) / SAMPLE_RATE)
-            logger.info("Section %d/%d: %.1fs narration", index + 1, len(sections),
-                        durations[-1])
+        # NARRATION IS STREAMED TO DISK, NEVER ASSEMBLED IN MEMORY.
+        #
+        # This held every section's audio in a list and then called
+        # np.concatenate over it, which is a second full copy of the whole
+        # narration alive at the same moment as the first. On the free 512MB
+        # instance, with piper already resident, that peak plus the ffmpeg
+        # subprocess spawned immediately afterwards was enough to have the
+        # container killed - and a killed container is a 502 with no error
+        # anywhere, which is exactly how this failed: reproducibly, on a
+        # single section of ten words, after surviving just long enough to
+        # synthesise the audio.
+        #
+        # soundfile can append, so each section is written and released as
+        # it is made. Peak audio memory is now ONE SECTION rather than the
+        # whole deck, and it no longer grows with the length of the video.
+        import soundfile as sf
 
         narration_path = workdir / "narration.wav"
-        encode_wav(np.concatenate(waveforms), narration_path)
-        waveforms.clear()
+        with sf.SoundFile(str(narration_path), "w", SAMPLE_RATE, 1,
+                          "PCM_16") as out:
+            for index, section in enumerate(sections):
+                slide_path = workdir / f"slide_{index:03d}.png"
+                render_slide(section, index, len(sections), deck_title, slide_path)
+
+                narration = _section_narration(section, index)
+                chunks = split_into_chunks(narration, max_chunk_chars)
+                waveform = engine.synthesize_turns([(voice, chunks)], speed=speed)
+                out.write(waveform)
+                out.write(pause)
+                durations.append((len(waveform) + len(pause)) / SAMPLE_RATE)
+                logger.info("Section %d/%d: %.1fs narration", index + 1,
+                            len(sections), durations[-1])
+                del waveform
+                gc.collect()
+
+        # RELEASE THE VOICE BEFORE FORKING.
+        #
+        # subprocess.run forks this process, and what it forks is one still
+        # holding a loaded piper model - the single largest allocation in the
+        # service at roughly 230MB of a 512MB budget. Dropping the LRU here
+        # hands that back before ffmpeg needs its own, and the next request
+        # reloads the voice lazily in about a second and a half. Paying that
+        # occasionally is plainly better than the render failing.
+        loaded = getattr(getattr(engine, "backend", None), "_loaded", None)
+        if hasattr(loaded, "clear"):
+            try:
+                loaded.clear()
+                logger.info("Released TTS voices before encoding")
+            except Exception:      # never fail a render over housekeeping
+                pass
+        gc.collect()
 
         concat_path = workdir / "slides.txt"
         lines = []
