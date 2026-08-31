@@ -364,7 +364,12 @@ class TTSEngine:
         if not segments:
             raise ValueError("Nothing to synthesize")
         waveform = np.concatenate(segments)
-        return np.clip(waveform, -1.0, 1.0)
+        # The parts are dead the moment the whole exists, and holding the
+        # list until this function returns kept a second full copy of the
+        # audio alive for no reason. Clipping in place avoids a third.
+        segments.clear()
+        np.clip(waveform, -1.0, 1.0, out=waveform)
+        return waveform
 
 
 def encode_mp3(waveform, path: Path, bitrate_kbps: int = 128) -> None:

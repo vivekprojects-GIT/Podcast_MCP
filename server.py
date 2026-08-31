@@ -117,6 +117,50 @@ def _mark_ready_after_preload() -> None:
         logger.info("Ready: preload complete (+%.0fs grace)", _READY_GRACE)
 
 
+def _run_and_release(what: str, fn):
+    """Run a tool body, then give the memory back whatever happened.
+
+    In the worker thread, because that is the thread that allocated, and
+    after the result is built rather than before it is returned - a render
+    that raised leaks exactly as much as one that succeeded.
+    """
+    try:
+        return fn()
+    finally:
+        _release_memory(what)
+
+
+def _release_memory(what: str) -> None:
+    """Hand freed pages back to the OS after a render.
+
+    MEASURED: a 31-second podcast took RSS from 251MB to 409MB and left it
+    there. Python had freed the waveforms - the objects were gone - but
+    glibc keeps the arenas it allocated them in, so the process stays fat.
+    On a 512MB instance that means the FIRST render after a restart succeeds
+    and the SECOND is killed, which is exactly the "it worked, now it
+    doesn't" this service kept producing.
+
+    Peak memory and retained memory are different problems and need
+    different fixes. Streaming the narration solved the peak; only
+    malloc_trim gives the pages back.
+
+    glibc-only, and entirely best-effort: on any platform without it this is
+    a no-op and the service behaves as it did before.
+    """
+    import gc
+    gc.collect()
+    rss_before = _rss_mb()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        return                      # not glibc, or not permitted
+    rss_after = _rss_mb()
+    if rss_before and rss_after:
+        logger.info("%s: released %.0fMB (%.0f -> %.0f)", what,
+                    rss_before - rss_after, rss_before, rss_after)
+
+
 def _await_ready(what: str) -> None:
     """Hold a tool call until this process can actually service it."""
     if _READY.is_set():
@@ -222,7 +266,10 @@ async def generate_podcast_from_script(
     # MCP SDK runs sync tools inline, which would block health checks.
     return await anyio.to_thread.run_sync(
         functools.partial(
-            _generate_podcast_sync, script, title, host_voice, guest_voice, speed
+            _run_and_release, "generate_podcast_from_script",
+            functools.partial(
+                _generate_podcast_sync, script, title, host_voice, guest_voice,
+                speed)
         )
     )
 
@@ -232,6 +279,7 @@ def _generate_podcast_sync(
 ) -> dict[str, Any]:
     try:
         _await_ready("generate_podcast_from_script")
+
         if len(script) > MAX_SCRIPT_CHARS:
             return {
                 "success": False,
@@ -309,13 +357,16 @@ async def text_to_speech(
     format: "mp3" or "wav".
     """
     return await anyio.to_thread.run_sync(
-        functools.partial(_text_to_speech_sync, text, voice, speed, format)
+        functools.partial(_run_and_release, "text_to_speech",
+                          functools.partial(_text_to_speech_sync, text, voice,
+                                            speed, format))
     )
 
 
 def _text_to_speech_sync(text: str, voice: str, speed: float, format: str) -> dict[str, Any]:
     try:
         _await_ready("text_to_speech")
+
         if len(text) > MAX_SCRIPT_CHARS:
             return {
                 "success": False,
@@ -366,7 +417,9 @@ async def generate_video_from_sections(
     works but renders slowly on the free tier (~2x the video length).
     """
     return await anyio.to_thread.run_sync(
-        functools.partial(_generate_video_sync, sections, title, voice, speed)
+        functools.partial(_run_and_release, "generate_video_from_sections",
+                          functools.partial(_generate_video_sync, sections,
+                                            title, voice, speed))
     )
 
 
@@ -375,6 +428,7 @@ def _generate_video_sync(
 ) -> dict[str, Any]:
     try:
         _await_ready("generate_video_from_sections")
+
         if not isinstance(sections, list) or not sections:
             return {"success": False, "error": "sections must be a non-empty list."}
         if len(sections) > MAX_VIDEO_SECTIONS:
