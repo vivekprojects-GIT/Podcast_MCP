@@ -27,6 +27,7 @@ from starlette.responses import FileResponse, JSONResponse
 
 from script_parser import parse_script, split_into_chunks
 from tts import SAMPLE_RATE, TTSEngine, encode_mp3, encode_wav
+from video import build_video
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("podcast-mcp")
@@ -37,6 +38,7 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_TTL_HOURS = float(os.environ.get("AUDIO_TTL_HOURS", "24"))
 MAX_SCRIPT_CHARS = int(os.environ.get("MAX_SCRIPT_CHARS", "20000"))
 MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", "300"))
+MAX_VIDEO_SECTIONS = int(os.environ.get("MAX_VIDEO_SECTIONS", "20"))
 
 engine = TTSEngine()
 
@@ -47,10 +49,12 @@ DEFAULT_GUEST_VOICE = os.environ.get("DEFAULT_GUEST_VOICE", "")
 mcp = FastMCP(
     "podcast-mcp",
     instructions=(
-        "Generate podcast audio with KittenTTS. Write the dialogue with your own "
-        "LLM first, then call generate_podcast_from_script with lines like "
-        "'HOST: ...' and 'GUEST: ...'. Use text_to_speech for single-voice audio. "
-        "Both return a public audio_url."
+        "Generate podcast audio and narrated slide videos from content your own "
+        "LLM writes. Call generate_podcast_from_script with dialogue lines like "
+        "'HOST: ...' and 'GUEST: ...' for an MP3; generate_video_from_sections "
+        "with structured sections (title, narration, key_points, optional "
+        "bar_chart visual) for an MP4; text_to_speech for single-voice audio. "
+        "All return a public URL."
     ),
     host="0.0.0.0",
     port=PORT,
@@ -244,6 +248,71 @@ def _text_to_speech_sync(text: str, voice: str, speed: float, format: str) -> di
 
 
 @mcp.tool()
+async def generate_video_from_sections(
+    sections: list[dict[str, Any]],
+    title: str = "",
+    voice: str = "",
+    speed: float = 1.0,
+) -> dict[str, Any]:
+    """Render a narrated slide video (MP4) from structured report sections.
+
+    Each section: {"title": str, "narration": str, "key_points": [str],
+    "visual": {"type": "bar_chart" | "bullet_summary", "data": {label: number}}}.
+    Every section becomes one slide (title + bullets + optional bar chart)
+    shown for the length of its narration, spoken by a single voice (empty =
+    engine default). Pass the same sections you use for the podcast script to
+    keep both outputs consistent. Returns a public video_url.
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(_generate_video_sync, sections, title, voice, speed)
+    )
+
+
+def _generate_video_sync(
+    sections: list[dict[str, Any]], title: str, voice: str, speed: float
+) -> dict[str, Any]:
+    try:
+        if not isinstance(sections, list) or not sections:
+            return {"success": False, "error": "sections must be a non-empty list."}
+        if len(sections) > MAX_VIDEO_SECTIONS:
+            return {
+                "success": False,
+                "error": f"Too many sections ({len(sections)}, max {MAX_VIDEO_SECTIONS}).",
+            }
+        total_chars = sum(len(str(s.get("narration", ""))) for s in sections)
+        if total_chars > MAX_SCRIPT_CHARS:
+            return {
+                "success": False,
+                "error": f"Narration too long ({total_chars} chars, max {MAX_SCRIPT_CHARS}).",
+            }
+        voice = engine.resolve_voice(voice or DEFAULT_HOST_VOICE or engine.default_host_voice)
+
+        started = time.time()
+        path = _new_audio_path(title or "video", "mp4")
+        duration = build_video(
+            engine, sections, title, voice, speed, path, MAX_CHUNK_CHARS
+        )
+        _cleanup_old_files()
+
+        logger.info(
+            "Generated %s: %.1fs video from %d sections in %.1fs",
+            path.name, duration, len(sections), time.time() - started,
+        )
+        return {
+            "success": True,
+            "type": "video",
+            "title": title or "Video",
+            "video_url": f"{_public_base_url()}/audio/{path.name}",
+            "duration_seconds": round(duration, 1),
+            "sections": len(sections),
+            "voice": voice,
+        }
+    except Exception as exc:
+        logger.exception("generate_video_from_sections failed")
+        return {"success": False, "error": str(exc)}
+
+
+@mcp.tool()
 def list_voices() -> dict[str, Any]:
     """List the active TTS engine, its available voices, and the current defaults."""
     return {
@@ -275,7 +344,12 @@ async def index(_: Request) -> JSONResponse:
         {
             "service": "podcast-mcp",
             "mcp_endpoint": "/mcp",
-            "tools": ["generate_podcast_from_script", "text_to_speech", "list_voices"],
+            "tools": [
+                "generate_podcast_from_script",
+                "generate_video_from_sections",
+                "text_to_speech",
+                "list_voices",
+            ],
         }
     )
 
@@ -286,7 +360,11 @@ async def serve_audio(request: Request) -> FileResponse | JSONResponse:
     path = (AUDIO_DIR / filename).resolve()
     if not path.is_file() or path.parent != AUDIO_DIR:
         return JSONResponse({"error": "not found"}, status_code=404)
-    media_type = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
+    media_type = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".mp4": "video/mp4",
+    }.get(path.suffix, "application/octet-stream")
     return FileResponse(path, media_type=media_type)
 
 

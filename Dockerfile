@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 
-# espeak-ng: phonemization backend used by some KittenTTS builds; small and safe
+# espeak-ng: phonemization backend used by some KittenTTS builds
+# ffmpeg + fonts-dejavu-core: slide-video rendering (generate_video_from_sections)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends espeak-ng \
+    && apt-get install -y --no-install-recommends espeak-ng ffmpeg fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
