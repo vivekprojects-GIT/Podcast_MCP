@@ -74,6 +74,42 @@ GUEST: Thanks for having me. The headline: revenue grew 18 percent.
 HOST: Let's break that down...
 ```
 
+### `generate_video_from_sections`
+
+Renders a narrated slide video (MP4): one slide per section — title, bullet
+points, optional PIL-drawn bar chart — shown for the length of its narration.
+Send the same structured `media_content` your LLM produces for the podcast to
+keep both outputs consistent:
+
+```json
+{
+  "title": "Q2 Portfolio Review",
+  "sections": [
+    {
+      "title": "Performance",
+      "narration": "Your portfolio returned 2.41 percent while the benchmark returned 3.77 percent.",
+      "key_points": ["Portfolio: 2.41%", "Benchmark: 3.77%"],
+      "visual": {"type": "bar_chart", "data": {"Portfolio": 2.41, "Benchmark": 3.77}}
+    }
+  ]
+}
+```
+
+Call with `{"sections": [...], "title": "...", "voice": "", "speed": 1.0}` →
+returns `{"success": true, "type": "video", "video_url": "...", "duration_seconds": ...}`.
+`visual.type` supports `bar_chart` (needs `data`) and `bullet_summary` (default).
+Run it in parallel with the podcast tool from one shared JSON:
+
+```python
+podcast, video = await asyncio.gather(
+    session.call_tool("generate_podcast_from_script", {"script": script, "title": title}),
+    session.call_tool("generate_video_from_sections", {"sections": sections, "title": title}),
+)
+```
+
+(Note: on the single-CPU free instance the two run back-to-back internally —
+parallel calls are safe, just not faster.)
+
 ### `text_to_speech`
 
 ```python
