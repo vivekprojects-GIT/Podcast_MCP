@@ -105,6 +105,21 @@ def _cleanup_old_files() -> None:
             pass
 
 
+# ~150 spoken words/minute ≈ 900 characters/minute
+_CHARS_PER_MINUTE = 900
+_WARN_MINUTES = 4.0
+
+
+def _duration_warning(char_count: int) -> str | None:
+    est_minutes = char_count / _CHARS_PER_MINUTE
+    if est_minutes <= _WARN_MINUTES:
+        return None
+    return (
+        f"~{est_minutes:.0f} min of speech; generation may take "
+        f"~{est_minutes * 2:.0f} min on the free tier. The sweet spot is 1-3 minutes."
+    )
+
+
 def _assign_voices(speakers: list[str], host_voice: str, guest_voice: str) -> dict[str, str]:
     """HOST/GUEST get their configured voices; extra named speakers cycle the rest."""
     assignments: dict[str, str] = {"HOST": host_voice, "GUEST": guest_voice}
@@ -135,6 +150,9 @@ async def generate_podcast_from_script(
     Any speaker labels work (SARAH:, MIKE:, ...); the first two speakers get
     host_voice and guest_voice. Leave voices empty for the engine defaults;
     call list_voices to see what's available. Returns a public audio_url.
+
+    Target 1-3 minutes of dialogue (~150-450 words) — longer scripts work but
+    generate slowly on the free tier (~2x the audio length).
     """
     # Off the event loop: synthesis takes minutes on small instances, and the
     # MCP SDK runs sync tools inline, which would block health checks.
@@ -184,7 +202,7 @@ def _generate_podcast_sync(
             "Generated %s: %.1fs audio from %d turns in %.1fs",
             path.name, duration, len(turns), time.time() - started,
         )
-        return {
+        result = {
             "success": True,
             "type": "podcast",
             "title": title or "Podcast",
@@ -193,6 +211,10 @@ def _generate_podcast_sync(
             "turns": len(turns),
             "voices": {speaker: voice_map[speaker] for speaker in speakers_in_order},
         }
+        warning = _duration_warning(sum(len(turn.text) for turn in turns))
+        if warning:
+            result["warning"] = warning
+        return result
     except Exception as exc:  # tool errors go back to the caller as data
         logger.exception("generate_podcast_from_script failed")
         return {"success": False, "error": str(exc)}
@@ -262,6 +284,9 @@ async def generate_video_from_sections(
     shown for the length of its narration, spoken by a single voice (empty =
     engine default). Pass the same sections you use for the podcast script to
     keep both outputs consistent. Returns a public video_url.
+
+    Target 1-3 minutes of total narration (~150-450 words) — longer content
+    works but renders slowly on the free tier (~2x the video length).
     """
     return await anyio.to_thread.run_sync(
         functools.partial(_generate_video_sync, sections, title, voice, speed)
@@ -298,7 +323,7 @@ def _generate_video_sync(
             "Generated %s: %.1fs video from %d sections in %.1fs",
             path.name, duration, len(sections), time.time() - started,
         )
-        return {
+        result = {
             "success": True,
             "type": "video",
             "title": title or "Video",
@@ -307,6 +332,10 @@ def _generate_video_sync(
             "sections": len(sections),
             "voice": voice,
         }
+        warning = _duration_warning(total_chars)
+        if warning:
+            result["warning"] = warning
+        return result
     except Exception as exc:
         logger.exception("generate_video_from_sections failed")
         return {"success": False, "error": str(exc)}

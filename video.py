@@ -29,6 +29,14 @@ BAR_ALT = (100, 116, 139)  # slate-500
 
 SECTION_PAUSE = 0.7  # silence appended after each section's narration
 
+# Branding watermark shown bottom-right on every slide; point LOGO_PATH at a
+# transparent PNG (relative paths resolve against this file's directory), or
+# set LOGO_PATH="" to disable.
+LOGO_PATH = os.environ.get("LOGO_PATH", "assets/logo.png")
+LOGO_HEIGHT = 34
+
+_logo_cache: list = []  # [Image | None], lazily filled
+
 _FONTS_BOLD = [
     "DejaVuSans-Bold.ttf",
     "C:/Windows/Fonts/arialbd.ttf",
@@ -50,6 +58,32 @@ def _font(size: int, bold: bool = False):
         except OSError:
             continue
     return ImageFont.load_default(size)
+
+
+def _get_logo():
+    if not _logo_cache:
+        logo = None
+        if LOGO_PATH:
+            path = Path(LOGO_PATH)
+            if not path.is_absolute():
+                path = Path(__file__).resolve().parent / path
+            if path.is_file():
+                try:
+                    from PIL import Image
+
+                    logo = Image.open(path).convert("RGBA")
+                    scale = LOGO_HEIGHT / logo.height
+                    logo = logo.resize(
+                        (max(1, int(logo.width * scale)), LOGO_HEIGHT),
+                        Image.LANCZOS,
+                    )
+                except Exception:
+                    logger.exception("Could not load logo from %s", path)
+                    logo = None
+            else:
+                logger.warning("LOGO_PATH %s not found; slides get no logo", path)
+        _logo_cache.append(logo)
+    return _logo_cache[0]
 
 
 def _wrap(draw, text: str, font, max_width: int) -> list[str]:
@@ -132,7 +166,20 @@ def render_slide(section: dict, index: int, total: int, deck_title: str, path: P
     if visual.get("type") == "bar_chart" and isinstance(visual.get("data"), dict):
         chart_y = max(y + 30, 330)
         _draw_bar_chart(draw, visual["data"], 80, chart_y, WIDTH - 160,
-                        HEIGHT - chart_y - 60)
+                        HEIGHT - chart_y - 90)
+
+    logo = _get_logo()
+    if logo is not None:
+        pad_x, pad_y = 14, 9
+        chip_w = logo.width + pad_x * 2
+        chip_h = logo.height + pad_y * 2
+        chip_x = WIDTH - 36 - chip_w
+        chip_y = HEIGHT - 28 - chip_h
+        draw.rounded_rectangle(
+            [chip_x, chip_y, chip_x + chip_w, chip_y + chip_h],
+            radius=10, fill=(248, 250, 252),
+        )
+        image.paste(logo, (chip_x + pad_x, chip_y + pad_y), logo)
 
     image.save(path, "PNG")
 
