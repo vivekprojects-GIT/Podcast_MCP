@@ -221,7 +221,10 @@ class PiperBackend:
     default_host_voice = "en_US-hfc_male-medium"
     default_guest_voice = "en_US-hfc_female-medium"
     strict_voices = False
-    _MAX_LOADED = 2  # host + guest; keeps two ~130MB sessions max in RAM
+    # One. synthesize_turns groups by voice and drops each session when
+    # it is finished, so nothing needs two resident - and two ~130MB
+    # sessions is what pushed a 512MB instance over the edge.
+    _MAX_LOADED = int(os.environ.get("MAX_LOADED_VOICES", "1"))
 
     def __init__(self) -> None:
         self.model_dir = Path(os.environ.get("PIPER_MODEL_DIR", "models/piper"))
@@ -347,20 +350,56 @@ class TTSEngine:
         turn_gap = np.zeros(int(TURN_PAUSE * SAMPLE_RATE), dtype=np.float32)
 
         _deprioritize_current_thread()
-        segments = []
+
+        # ONE VOICE IN MEMORY AT A TIME.
+        #
+        # Walking the turns in order alternates HOST and GUEST, so both
+        # sessions had to be resident and _MAX_LOADED was set to 2 to keep
+        # them. Two ~130MB ONNX sessions, on top of a ~250MB process, plus
+        # the audio being built, does not fit in 512MB: a two-voice podcast
+        # killed the instance while the SAME script with one voice rendered
+        # fine. It was never the script or its length.
+        #
+        # The timeline is planned first and filled in afterwards, so the
+        # turns can be synthesized grouped by voice while the output stays in
+        # the order it was asked for. Each voice loads once - two loads for a
+        # dialogue rather than one per speaker change - and is dropped before
+        # the next is touched, so the peak holds one session instead of two.
+        slots: list = []
+        by_voice: dict[str, list] = {}
+        for turn_index, (voice, chunks) in enumerate(turns):
+            if turn_index > 0:
+                slots.append(turn_gap)
+            for chunk_index, chunk in enumerate(chunks):
+                if chunk_index > 0:
+                    slots.append(chunk_gap)
+                slots.append(None)                 # filled below
+                by_voice.setdefault(voice, []).append((len(slots) - 1, chunk))
+
         with self._lock:
-            for turn_index, (voice, chunks) in enumerate(turns):
-                if turn_index > 0:
-                    segments.append(turn_gap)
-                for chunk_index, chunk in enumerate(chunks):
-                    if chunk_index > 0:
-                        segments.append(chunk_gap)
+            for voice, items in by_voice.items():
+                for slot_index, chunk in items:
                     chunk_started = time.time()
-                    segments.append(self.backend.generate_chunk(chunk, voice, speed))
+                    slots[slot_index] = self.backend.generate_chunk(
+                        chunk, voice, speed)
                     if _PACE > 0:
                         elapsed = time.time() - chunk_started
                         time.sleep(min(max(elapsed * _PACE, _PACE_MIN_SLEEP), _PACE_MAX_SLEEP))
+                # Done with this voice. Hand the session back before loading
+                # the next one, rather than relying on an LRU bound that was
+                # itself the thing sizing the process too large.
+                loaded = getattr(self.backend, "_loaded", None)
+                if hasattr(loaded, "pop"):
+                    try:
+                        loaded.pop(voice, None)
+                    except Exception:
+                        pass
                 gc.collect()  # keep RSS flat on memory-tight instances
+
+        segments = [x for x in slots if x is not None]
+        if len(segments) != len(slots):
+            raise RuntimeError("a turn was not synthesized")
+        slots.clear()
         if not segments:
             raise ValueError("Nothing to synthesize")
         waveform = np.concatenate(segments)
