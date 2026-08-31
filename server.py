@@ -65,6 +65,70 @@ mcp = FastMCP(
 
 _STARTED_AT = time.time()
 
+# READINESS, NOT UPTIME.
+#
+# A free instance loses /tmp when it sleeps, so waking means re-downloading
+# the voice (~126MB) and loading it. The HTTP layer is answering throughout
+# that, which is the trap: /mcp replies normally while the process is in no
+# state to render, and a heavy call landing on top of the download took the
+# whole service down - observed at 33 seconds after wake, and reproducibly
+# survivable once warm.
+#
+# Callers were left inferring this from uptime_seconds, which is a proxy for
+# the thing rather than the thing. Only this process knows when its preload
+# actually finished, so it is this process that should hold the call.
+#
+# A held call is a slower first response. An unheld one is a 502 and a dead
+# instance, so the trade is not close.
+_READY = threading.Event()
+
+# Loading ends before the memory it churned is fully given back. The grace
+# is small, and it is the difference between "the model is in RAM" and "this
+# process can take another 200MB right now".
+_READY_GRACE = float(os.environ.get("READY_GRACE_SECONDS", "5"))
+
+# A ceiling on the hold, so a preload that never finishes degrades to the old
+# behaviour - attempt it anyway - rather than hanging the caller until their
+# own timeout fires.
+#
+# AND IT MUST LEAVE ROOM FOR THE RENDER. The hold is only useful if the call
+# it protects can still finish inside the CALLER's timeout: a client that
+# gives up at 240s gains nothing from a server that held its request for 239
+# of them. The reporting app's MCP timeout is 240s and a render is 40-90s,
+# so this sits at 120 and leaves comfortable room for both. Preload is a
+# ~126MB download plus a load - well inside this - so the ceiling is a
+# backstop, not the expected path.
+_READY_WAIT = float(os.environ.get("READY_WAIT_SECONDS", "120"))
+
+
+def _mark_ready_after_preload() -> None:
+    try:
+        engine.preload()
+    except Exception:
+        # preload() already handles its own failures; this is so a surprise
+        # can never kill the thread that opens the gate.
+        logger.exception("Preload thread failed; opening the gate anyway")
+    finally:
+        # Ready even if preload RAISED. The backend loads lazily on first
+        # use, so a failed preload means a slow first render, not a broken
+        # one - and refusing to open the gate would turn that into an outage.
+        time.sleep(_READY_GRACE)
+        _READY.set()
+        logger.info("Ready: preload complete (+%.0fs grace)", _READY_GRACE)
+
+
+def _await_ready(what: str) -> None:
+    """Hold a tool call until this process can actually service it."""
+    if _READY.is_set():
+        return
+    waited = time.time()
+    if _READY.wait(_READY_WAIT):
+        logger.info("%s held %.1fs for preload", what, time.time() - waited)
+    else:
+        # Proceed regardless: a render that might work beats a refusal.
+        logger.warning("%s proceeding after %.0fs without ready signal",
+                       what, time.time() - waited)
+
 
 def _rss_mb() -> float | None:
     """Resident memory in MB (Linux only) — for watching the 512MB free-tier limit."""
@@ -167,6 +231,7 @@ def _generate_podcast_sync(
     script: str, title: str, host_voice: str, guest_voice: str, speed: float
 ) -> dict[str, Any]:
     try:
+        _await_ready("generate_podcast_from_script")
         if len(script) > MAX_SCRIPT_CHARS:
             return {
                 "success": False,
@@ -250,6 +315,7 @@ async def text_to_speech(
 
 def _text_to_speech_sync(text: str, voice: str, speed: float, format: str) -> dict[str, Any]:
     try:
+        _await_ready("text_to_speech")
         if len(text) > MAX_SCRIPT_CHARS:
             return {
                 "success": False,
@@ -308,6 +374,7 @@ def _generate_video_sync(
     sections: list[dict[str, Any]], title: str, voice: str, speed: float
 ) -> dict[str, Any]:
     try:
+        _await_ready("generate_video_from_sections")
         if not isinstance(sections, list) or not sections:
             return {"success": False, "error": "sections must be a non-empty list."}
         if len(sections) > MAX_VIDEO_SECTIONS:
@@ -373,6 +440,7 @@ async def health(_: Request) -> JSONResponse:
             "engine": engine.name,
             "model": engine.model_id,
             "uptime_seconds": round(time.time() - _STARTED_AT),
+            "ready": _READY.is_set(),
             "rss_mb": _rss_mb(),
         }
     )
@@ -412,6 +480,11 @@ async def serve_audio(request: Request) -> FileResponse | JSONResponse:
 
 if __name__ == "__main__":
     if os.environ.get("PRELOAD_MODEL", "1") == "1":
-        threading.Thread(target=engine.preload, daemon=True).start()
+        threading.Thread(target=_mark_ready_after_preload, daemon=True).start()
+    else:
+        # Nothing to wait for: the first request loads the model itself, and
+        # holding calls for a preload that was never started would deadlock
+        # every tool on this instance.
+        _READY.set()
     logger.info("Starting podcast-mcp on port %d (MCP endpoint: /mcp)", PORT)
     mcp.run(transport="streamable-http")
