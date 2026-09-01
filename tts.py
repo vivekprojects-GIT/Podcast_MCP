@@ -39,6 +39,21 @@ _PACE_MIN_SLEEP = 0.3
 _PACE_MAX_SLEEP = 3.0
 
 
+def _trim_malloc() -> None:
+    """Return freed pages to the OS. glibc only; a no-op anywhere else.
+
+    gc.collect() frees the OBJECTS, and glibc keeps the arenas they lived
+    in. That distinction is the whole two-voice failure: a voice was
+    evicted between turn groups and its ~130MB stayed resident, so the next
+    voice loaded on top of memory nothing was using. The trim is what
+    actually hands it back before the next allocation asks for more.
+    """
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
 def _deprioritize_current_thread() -> None:
     """Lower this thread's scheduling priority (Linux) so the web server wins."""
     try:
@@ -394,7 +409,14 @@ class TTSEngine:
                         loaded.pop(voice, None)
                     except Exception:
                         pass
-                gc.collect()  # keep RSS flat on memory-tight instances
+                gc.collect()
+                # AND GIVE THE PAGES BACK BEFORE THE NEXT VOICE ASKS FOR ITS
+                # OWN. Evicting without trimming freed the object and kept
+                # the memory, so a two-voice dialogue still peaked at two
+                # sessions - which is the shape this grouping exists to
+                # avoid. Measured: the instance entered a failing render
+                # holding 296MB where a healthy one sits near 100MB.
+                _trim_malloc()
 
         segments = [x for x in slots if x is not None]
         if len(segments) != len(slots):
