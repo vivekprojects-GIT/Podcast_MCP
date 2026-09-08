@@ -305,9 +305,29 @@ def _generate_podcast_sync(
         ]
 
         started = time.time()
+        rss = {"start": _rss_mb()}
         waveform = engine.synthesize_turns(synth_input, speed=speed)
+        rss["synth"] = _rss_mb()
+
+        # DURATION FIRST, THEN LET THE AUDIO GO.
+        #
+        # This was read at the very END of the function, which kept the whole
+        # waveform alive through the mp3 encode, the cover rendering and the
+        # file cleanup — every one of which allocates on top of it. The video
+        # path never had this problem because it streams to disk and hands
+        # off to ffmpeg, and it shows in the measurements: a video render
+        # settles back to ~112MB where a podcast settled at ~224MB, and the
+        # presentation that ran next had nowhere to put ffmpeg.
+        #
+        # It is one integer. Taking it before the encode costs nothing and
+        # makes the array dead the moment it has been written out.
+        duration = round(len(waveform) / SAMPLE_RATE, 1)
+
         path = _new_audio_path(title or "podcast", "mp3")
         encode_mp3(waveform, path)
+        del waveform
+        _release_memory("podcast:encoded")
+        rss["encoded"] = _rss_mb()
 
         thumbnail_url = None
         try:
@@ -317,9 +337,22 @@ def _generate_podcast_sync(
             thumbnail_url = f"{_public_base_url()}/audio/{cover_path.name}"
         except Exception:
             logger.exception("Cover art failed; podcast delivered without it")
+        # AND GIVE THE VOICES BACK. A dialogue loads two sessions where a
+        # video loads one, and once the mp3 is written neither is doing
+        # anything - but the NEXT call may be a presentation that needs room
+        # for ffmpeg, which is exactly the sequence that failed: podcast
+        # succeeded, presentation died, and the difference was the 110MB the
+        # podcast was still holding. Costs about a second and a half to
+        # reload on the next render, which is nothing against a crash.
+        loaded = getattr(getattr(engine, "backend", None), "_loaded", None)
+        if hasattr(loaded, "clear"):
+            try:
+                loaded.clear()
+            except Exception:
+                pass
+        _release_memory("podcast:cover")
+        rss["cover"] = _rss_mb()
         _cleanup_old_files()
-
-        duration = round(len(waveform) / SAMPLE_RATE, 1)
         logger.info(
             "Generated %s: %.1fs audio from %d turns in %.1fs",
             path.name, duration, len(turns), time.time() - started,
@@ -335,6 +368,11 @@ def _generate_podcast_sync(
         }
         if thumbnail_url:
             result["thumbnail_url"] = thumbnail_url
+        # Stage-by-stage resident memory. Small, and the only way to see
+        # WHERE a render leaves memory behind without shell access to the
+        # instance; unknown keys are ignored by callers.
+        if any(v is not None for v in rss.values()):
+            result["rss_mb"] = rss
         warning = _duration_warning(sum(len(turn.text) for turn in turns))
         if warning:
             result["warning"] = warning
