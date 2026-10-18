@@ -116,6 +116,42 @@ parallel calls are safe, just not faster.)
 text_to_speech(text: str, voice: str = "", speed: float = 1.0, format: str = "mp3")
 ```
 
+### `send_email`
+
+Send an email through the server's configured SMTP account — e.g. mail the
+generated podcast/video links (or attach the files) to a report's audience:
+
+```json
+{
+  "to": ["colleague@company.com"],
+  "subject": "Q2 Business Review — podcast & video",
+  "body": "Audio: https://.../q2.mp3\nVideo: https://.../q2.mp4",
+  "html_body": "<p>Listen: <a href='https://.../q2.mp3'>podcast</a> · Watch: <a href='https://.../q2.mp4'>video</a></p>",
+  "attachments": ["https://.../audio/q2.mp3"],
+  "token": "<EMAIL_TOOL_TOKEN>"
+}
+```
+
+- **Disabled until configured** — set the `SMTP_*` and `EMAIL_TOOL_TOKEN` env vars
+  below (Render dashboard → Environment). The MCP endpoint is public, so the
+  `token` argument must match `EMAIL_TOOL_TOKEN` on every call; optionally pin
+  recipients with `EMAIL_ALLOWED_RECIPIENTS`.
+- `attachments` accepts `audio_url`/`video_url`/`thumbnail_url` values returned
+  by this server (20 MB combined cap; files expire per `AUDIO_TTL_HOURS`).
+  For big videos, send the link instead.
+- **Gmail setup**: enable 2-step verification, create an [App Password](https://myaccount.google.com/apppasswords),
+  then set `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER=you@gmail.com`,
+  `SMTP_PASSWORD=<app password>`.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `SMTP_HOST` / `SMTP_PORT` | — / `587` | SMTP server (e.g. `smtp.gmail.com`) |
+| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none` |
+| `SMTP_USER` / `SMTP_PASSWORD` | — | Login (Gmail: an App Password) |
+| `SMTP_FROM` | `SMTP_USER` | From address |
+| `EMAIL_TOOL_TOKEN` | — (tool disabled) | Shared secret callers must pass as `token` |
+| `EMAIL_ALLOWED_RECIPIENTS` | any | Comma list of addresses and/or `@domains` |
+
 ### `list_voices`
 
 Returns the active engine, its voices, and the current defaults.

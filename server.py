@@ -25,6 +25,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 
+import mailer
 from script_parser import parse_script, split_into_chunks
 from tts import SAMPLE_RATE, TTSEngine, encode_mp3, encode_wav
 from video import build_video, embed_cover, render_podcast_cover
@@ -512,6 +513,65 @@ def _generate_video_sync(
 
 
 @mcp.tool()
+async def send_email(
+    to: list[str],
+    subject: str,
+    body: str,
+    token: str,
+    html_body: str = "",
+    attachments: list[str] | None = None,
+) -> dict[str, Any]:
+    """Send an email through this server's configured SMTP account.
+
+    token must match the server's EMAIL_TOOL_TOKEN (ask the server owner).
+    body is plain text; html_body optionally adds an HTML version — put
+    generated audio_url / video_url links there for a clickable email.
+    attachments may list audio_url/video_url/thumbnail_url values returned by
+    this server's other tools; those files are attached directly (20MB total
+    cap — prefer links for large videos). Max 10 recipients.
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _send_email_sync, to, subject, body, token, html_body, attachments or []
+        )
+    )
+
+
+def _send_email_sync(
+    to: list[str],
+    subject: str,
+    body: str,
+    token: str,
+    html_body: str,
+    attachments: list[str],
+) -> dict[str, Any]:
+    try:
+        mailer.check_token(token)
+        recipients = mailer.validate_recipients(to)
+        if not subject.strip():
+            return {"success": False, "error": "Subject is empty."}
+        if len(body) + len(html_body) > mailer.MAX_BODY_CHARS:
+            return {"success": False, "error": "Email body too large."}
+        attachment_paths = mailer.resolve_attachments(attachments, AUDIO_DIR)
+        sender = mailer.send_message(
+            recipients, subject, body, html_body, attachment_paths
+        )
+        return {
+            "success": True,
+            "type": "email",
+            "from": sender,
+            "to": recipients,
+            "subject": subject,
+            "attachments": [path.name for path in attachment_paths],
+        }
+    except mailer.EmailError as exc:
+        return {"success": False, "error": str(exc)}
+    except Exception as exc:
+        logger.exception("send_email failed")
+        return {"success": False, "error": str(exc)}
+
+
+@mcp.tool()
 def list_voices() -> dict[str, Any]:
     """List the active TTS engine, its available voices, and the current defaults."""
     return {
@@ -549,6 +609,7 @@ async def index(_: Request) -> JSONResponse:
                 "generate_video_from_sections",
                 "text_to_speech",
                 "list_voices",
+                "send_email",
             ],
         }
     )
